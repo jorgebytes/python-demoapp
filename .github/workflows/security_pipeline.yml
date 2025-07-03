@@ -159,7 +159,7 @@ jobs:
 
       - name: Build test application
         run: |
-          docker build --file --file build/Dockerfile -t test-app:latest .
+          docker build --file build/Dockerfile -t test-app:latest .
         
       - name: Start test application and wait for it to be ready
         run: |
