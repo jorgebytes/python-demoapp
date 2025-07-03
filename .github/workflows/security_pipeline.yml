@@ -163,15 +163,10 @@ jobs:
         
       - name: Start test application and wait for it to be ready
         run: |
-          mkdir data
-          mkdir config
-
           docker run -d \
             --name test-app \
             --network dast-network \
             -p ${DOCKER_PORT}:${DOCKER_PORT} \
-            -v "${{ github.workspace }}/config:/etc/radicale" \
-            -v "${{ github.workspace }}/data:/var/lib/radicale" \
             test-app:latest
 
           echo "Waiting for application to start..."
