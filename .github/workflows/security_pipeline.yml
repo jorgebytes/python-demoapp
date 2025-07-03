@@ -1,0 +1,259 @@
+name: SAST & DAST pipeline
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  sast-codeql:
+    name: CodeQL SAST Analysis
+    runs-on: ubuntu-latest
+
+    # Modify the language array with the languages of the repo which are to be analyzed
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['python','javascript']
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Initizlize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+      
+      - name: CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{matrix.language}}"
+
+  sca:
+    name: Dependency analysis with Trivy
+    runs-on: ubuntu-latest
+    needs: [sast-codeql]
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Create reports directory
+      run: mkdir -p reports/trivy
+
+    - name: Build Docker image
+      run: |
+        docker build --file build/Dockerfile -t web-app:latest .
+    
+    # Dependency vulnerability check based on dependency files as requierements.txt
+    - name: Run Trivy vulnerability scanner on repository packages and dependency files
+      id: trivy-repo
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'reports/trivy/trivy-repo.sarif'
+        title: 'Dependencies Vulnerabilities'
+        exit-code: '0'
+
+    # Configuration check of IaC and Dockerfile files
+    - name: Run Trivy config scanner on IaC and Dockerfiles
+      id: trivy-config
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'config'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'reports/trivy/trivy-config.sarif'
+        title: 'IaC and Dockerfile Vulnerabilities'
+        exit-code: '0'
+
+    # Check for vulns on Docker built container 
+    - name: Run Trivy vulnerability scanner on Docker image
+      id: trivy-image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'web-app:latest'
+        format: 'sarif'
+        output: 'reports/trivy/trivy-image.sarif'
+        title: 'Docker Image Vulnerabilities'
+        exit-code: '0'
+
+    - name: Upload Trivy SARIF results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: reports/trivy/trivy-repo.sarif
+        category: "trivy-repository"
+
+    - name: Upload Trivy Image SARIF results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: reports/trivy/trivy-image.sarif
+        category: "trivy-image"
+
+    - name: Upload Trivy Config SARIF results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: reports/trivy/trivy-config.sarif
+        category: "trivy-config"
+    
+    - name: Check for critical vulnerabilities on trivy-repo.sarif
+      if: steps.trivy-repo.outcome == 'success'
+      run: |
+        if grep -q '"level":"error"' reports/trivy/trivy-repo.sarif && grep -q 'CRITICAL' reports/trivy/trivy-repo.sarif; then
+          echo "CRITICAL vulnerabilities on trivy-repo.sarif"
+          exit 1
+        fi
+    
+    - name: Check for critical vulnerabilities on trivy-config.sarif
+      if: steps.trivy-config.outcome == 'success'
+      run: |
+        if grep -q '"level":"error"' reports/trivy/trivy-config.sarif && grep -q 'CRITICAL' reports/trivy/trivy-config.sarif; then
+          echo "CRITICAL vulnerabilities on trivy-config.sarif"
+          exit 1
+        fi
+
+    - name: Check for critical vulnerabilities on trivy-image.sarif
+      if: steps.trivy-image.outcome == 'success'
+      run: |
+        if grep -q '"level":"error"' reports/trivy/trivy-image.sarif && grep -q 'CRITICAL' reports/trivy/trivy-image.sarif; then
+          echo "CRITICAL vulnerabilities on trivy-image.sarif"
+          exit 1
+        fi
+    
+
+  dast:
+      name: Pruebas DAST
+      runs-on: ubuntu-latest
+      needs: [sca]
+      env:
+        DOCKER_PORT: "5000"
+        ZAP_SCAN_TYPE: 'baseline'
+      
+      steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v3
+
+      - name: Create Docker network
+        run: docker network create dast-network
+
+      - name: Create ZAP working directory
+        run: |
+          mkdir -p ${{ github.workspace }}/zap-reports
+          chmod 777 ${{ github.workspace }}/zap-reports
+
+      - name: Build test application
+        run: |
+          docker build --file --file build/Dockerfile -t test-app:latest .
+        
+      - name: Start test application and wait for it to be ready
+        run: |
+          mkdir data
+          mkdir config
+
+          docker run -d \
+            --name test-app \
+            --network dast-network \
+            -p ${DOCKER_PORT}:${DOCKER_PORT} \
+            -v "${{ github.workspace }}/config:/etc/radicale" \
+            -v "${{ github.workspace }}/data:/var/lib/radicale" \
+            test-app:latest
+
+          echo "Waiting for application to start..."
+          sleep 30
+          # Verificar que la aplicación responde
+          timeout 60 bash -c 'until curl -f http://localhost:${DOCKER_PORT}/health || curl -f http://localhost:${DOCKER_PORT}/ ; do sleep 5; done'
+
+
+      - name: Run ZAP Baseline Scan
+        id: zap-baseline
+        if: env.ZAP_SCAN_TYPE == 'baseline'
+        run: |
+          docker run --rm \
+            --name zap-scan \
+            --network dast-network \
+            -v ${{ github.workspace }}/zap-reports:/zap/wrk \
+            -u root \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://test-app:${DOCKER_PORT} \
+            -r zap-baseline-report.html \
+            -x zap-baseline-report.xml \
+            -J zap-baseline-report.json \
+            -I \
+            -a \
+            -j
+
+      ###########################
+      # ZAP Full Scan consumes a great time and resources. In order to execute it change the value of ZAP_SCAN_TYPE to full, being responsible of the usage of GitHub Actions minutes
+      ###########################
+      - name: Run ZAP Full Scan (más exhaustivo)
+        id: zap-full
+        if: env.ZAP_SCAN_TYPE == 'full'
+        run: |
+          docker run --rm \
+            --name zap-full-scan \
+            --network dast-network \
+            -v ${{ github.workspace }}/zap-reports:/zap/wrk \
+            -u root \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py \
+            -t http://test-app:${DOCKER_PORT} \
+            -r zap-full-report.html \
+            -x zap-full-report.xml \
+            -J zap-full-report.json \
+            -I \
+            -a \
+            -j
+
+      - name: Check application logs (debugging)
+        if: always()
+        run: |
+          echo "=== Application logs ==="
+          docker logs test-app || true
+
+      - name: List generated reports
+        if: steps.zap-baseline.outcome == 'success' || steps.zap-full.outcome == 'success'
+        run: |
+          echo "=== Generated reports ==="
+          ls -la ${{ github.workspace }}/zap-reports/
+
+      - name: Upload ZAP Reports
+        if: steps.zap-baseline.outcome == 'success' || steps.zap-full.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-security-reports
+          path: |
+            ${{ github.workspace }}/zap-reports/zap-*.html
+            ${{ github.workspace }}/zap-reports/zap-*.xml
+            ${{ github.workspace }}/zap-reports/zap-*.json
+
+      - name: Check if vulns found with ZAP
+        if: steps.zap-baseline.outcome == 'success' || steps.zap-full.outcome == 'success'
+        run: |
+          if grep -q '"riskdesc":"High"\|"riskdesc":"Critical"' ${{ github.workspace }}/zap-reports/zap-${ZAP_SCAN_TYPE}-report.json; then
+            echo "Se encontraron vulnerabilidades High o Critical"
+            exit 1
+          fi
+        
+      - name: Cleanup Docker
+        if: always()
+        run: |
+          docker stop test-app || true
+          docker rm test-app || true
+          docker network rm dast-network || true
