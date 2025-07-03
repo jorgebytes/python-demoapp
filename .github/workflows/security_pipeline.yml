@@ -112,7 +112,7 @@ jobs:
     - name: Check for critical vulnerabilities on trivy-repo.sarif
       if: steps.trivy-repo.outcome == 'success'
       run: |
-        if grep -q '"level":"error"' reports/trivy/trivy-repo.sarif && grep -q 'CRITICAL' reports/trivy/trivy-repo.sarif; then
+        if grep -q 'CRITICAL' reports/trivy/trivy-repo.sarif; then
           echo "CRITICAL vulnerabilities on trivy-repo.sarif"
           exit 1
         fi
@@ -120,7 +120,7 @@ jobs:
     - name: Check for critical vulnerabilities on trivy-config.sarif
       if: steps.trivy-config.outcome == 'success'
       run: |
-        if grep -q '"level":"error"' reports/trivy/trivy-config.sarif && grep -q 'CRITICAL' reports/trivy/trivy-config.sarif; then
+        if grep -q 'CRITICAL' reports/trivy/trivy-config.sarif; then
           echo "CRITICAL vulnerabilities on trivy-config.sarif"
           exit 1
         fi
@@ -128,7 +128,7 @@ jobs:
     - name: Check for critical vulnerabilities on trivy-image.sarif
       if: steps.trivy-image.outcome == 'success'
       run: |
-        if grep -q '"level":"error"' reports/trivy/trivy-image.sarif && grep -q 'CRITICAL' reports/trivy/trivy-image.sarif; then
+        if grep -q 'CRITICAL' reports/trivy/trivy-image.sarif; then
           echo "CRITICAL vulnerabilities on trivy-image.sarif"
           exit 1
         fi
